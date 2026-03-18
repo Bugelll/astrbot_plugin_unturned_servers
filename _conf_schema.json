@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "type": "text",
+    "description": "服务器列表（每行一个，格式：名称,IP,查询端口）",
+    "hint": "每行一个服务器，格式：名称,IP地址,查询端口\n查询端口一般是游戏端口+1，如果不确定就两个都试试\n例如：\n我的服务器,123.45.67.89,27016\n朋友的服务器,98.76.54.32,27016",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "query_timeout": {
+    "type": "int",
+    "description": "查询超时秒数",
+    "hint": "超时后服务器显示为离线",
+    "default": 5
+  }
+}
