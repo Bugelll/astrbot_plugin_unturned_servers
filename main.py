@@ -1,4 +1,5 @@
 import asyncio
+import re
 
 import a2s
 from astrbot.api import star, logger, AstrBotConfig
@@ -24,12 +25,13 @@ class Main(star.Star):
             return []
         if not isinstance(raw, str):
             raw = str(raw)
-        if not raw.strip():
+        raw = raw.strip()
+        if not raw:
             return []
         # 兼容面板可能将换行转义为字面 \n
-        raw = raw.replace("\\n", "\n")
+        # Support literal "\n" produced by some admin panels.
         result = []
-        for line in raw.strip().splitlines():
+        for line in self._split_server_lines(raw):
             line = line.strip()
             if not line:
                 continue
@@ -50,6 +52,38 @@ class Main(star.Star):
                 continue
             result.append({"name": name, "host": host, "port": port})
         return result
+
+    @staticmethod
+    def _split_server_lines(raw: str) -> list[str]:
+        """Split server config lines while preserving literal '\\n' in names."""
+        if "\n" in raw or "\r" in raw:
+            return raw.splitlines()
+        if "\\n" not in raw and "\\r\\n" not in raw:
+            return [raw]
+
+        escaped = raw.replace("\\r\\n", "\\n")
+        chunks = escaped.split("\\n")
+        lines = []
+        buffer = []
+
+        for chunk in chunks:
+            buffer.append(chunk)
+            candidate = "\\n".join(buffer).strip()
+            if Main._looks_like_server_line(candidate):
+                lines.append(candidate)
+                buffer = []
+
+        if buffer:
+            lines.append("\\n".join(buffer).strip())
+        return lines
+
+    @staticmethod
+    def _looks_like_server_line(line: str) -> bool:
+        """Check whether the buffered text already forms one server entry."""
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) not in (2, 3):
+            return False
+        return bool(re.fullmatch(r"\d+", parts[-1]))
 
     def _get_timeout(self) -> float:
         """从插件配置中读取超时秒数"""
@@ -97,6 +131,14 @@ class Main(star.Star):
             logger.warning(f"查询服务器 {host}:{port} 玩家失败: {e}")
             return None
 
+    async def _query_server_snapshot(self, host: str, port: int, timeout: float):
+        """Query info first, then query players only when the server is online."""
+        info = await self._query_server_info(host, port, timeout)
+        if info is None:
+            return None, None
+        players = await self._query_server_players(host, port, timeout)
+        return info, players
+
     @staticmethod
     def _format_duration(seconds: float) -> str:
         """将秒数格式化为可读时间字符串"""
@@ -126,12 +168,12 @@ class Main(star.Star):
             self._query_server_info(srv["host"], srv["port"], timeout)
             for srv in servers
         ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks)
 
         lines = ["🎮 Unturned 服务器状态", ""]
         for i, (srv, result) in enumerate(zip(servers, results), 1):
             name = srv["name"]
-            if isinstance(result, Exception) or result is None:
+            if result is None:
                 lines.append(f"[{i}] {name}")
                 lines.append("  状态: 🔴 离线（连接超时）")
             else:
@@ -159,28 +201,18 @@ class Main(star.Star):
             )
             return
 
-        # 并行查询所有服务器的 info 和 players
-        info_tasks = [
-            self._query_server_info(srv["host"], srv["port"], timeout)
+        # Query servers in parallel, but keep info/players sequential per server.
+        tasks = [
+            self._query_server_snapshot(srv["host"], srv["port"], timeout)
             for srv in servers
         ]
-        player_tasks = [
-            self._query_server_players(srv["host"], srv["port"], timeout)
-            for srv in servers
-        ]
-        all_tasks = info_tasks + player_tasks
-        all_results = await asyncio.gather(*all_tasks, return_exceptions=True)
-
-        info_results = all_results[:len(servers)]
-        player_results = all_results[len(servers):]
+        results = await asyncio.gather(*tasks)
 
         lines = ["👥 Unturned 在线玩家", ""]
-        for i, (srv, info, plist) in enumerate(
-            zip(servers, info_results, player_results), 1
-        ):
+        for i, (srv, (info, plist)) in enumerate(zip(servers, results), 1):
             name = srv["name"]
 
-            if isinstance(info, Exception) or info is None:
+            if info is None:
                 lines.append(f"[{i}] {name}")
                 lines.append("  状态: 🔴 离线（连接超时）")
             else:
@@ -188,7 +220,7 @@ class Main(star.Star):
                 max_p = info.max_players
                 lines.append(f"[{i}] {name} ({count}/{max_p})")
 
-                if isinstance(plist, Exception) or plist is None or not plist:
+                if plist is None or not plist:
                     lines.append("  暂无在线玩家")
                 else:
                     # 按在线时间降序排列
